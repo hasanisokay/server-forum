@@ -12,7 +12,7 @@ app.use(cors());
 const server = http.createServer(app);
 const io = socketIO(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    origin: "http://localhost:3000",
     methods: ["GET", "POST"],
   },
 });
@@ -102,44 +102,83 @@ io.on("connection", async (socket) => {
     }
   });
 
-  socket.on("newCommentNotification", async ({ newCommentNotification, commentID }) => {
-    const { commenterUsername, commenterName, date, postID } =
-      newCommentNotification;
-
-    try {
-      const post = await Post.findById(postID)
-        .select("followers author")
-        .exec();
-      if (!post) {
-        console.error("Post not found");
-        return;
-      }
-      const followers = post?.followers.filter(
-        (username) => username !== commenterUsername
-      );
-      const postAuthor = post?.author?.username;
-      const newNotification = {
+  socket.on(
+    "newCommentNotification",
+    async ({ newCommentNotification, commentID }) => {
+      const {
         commenterUsername,
+        commentAuthorUsername,
+        commenterName,
         date,
-        message: commentID ? `${commenterName} replied to a comment you are following.` : `${commenterName} commented on a post you are following.`,
         postID,
-        read: false,
-      };
+      } = newCommentNotification;
 
-      // sending notifications to followers
-      followers?.forEach((username) => {
-        io.to(username).emit("newCommentNotification", newNotification);
-      });
+      try {
+        const post = await Post.findById(postID)
+          .select("followers author")
+          .exec();
+        if (!post) {
+          console.error("Post not found");
+          return;
+        }
+        const postAuthor = post?.author?.username;
+        const followers = post?.followers.filter(
+          (u) =>
+            u !== commenterUsername &&
+            u !== commentAuthorUsername &&
+            u !== postAuthor
+        );
+        const newNotification = {
+          commenterUsername,
+          date,
+          message: commentID
+            ? `${commenterName} replied to a comment you are following.`
+            : `${commenterName} commented on a post you are following.`,
+          postID,
+          read: false,
+        };
 
-      // sending notification to post author
-      if (postAuthor !== commenterUsername) {
-        newNotification.message = commentID ? `${commenterName} replied to a comment on your post.` : `${commenterName} commented on your post.`;
-        io.to(postAuthor).emit("newCommentNotification", newNotification);
+        // sending notifications to followers
+        followers?.forEach((username) => {
+          io.to(username).emit("newCommentNotification", newNotification);
+        });
+
+        // sending to postAuthor and comment author
+        if (postAuthor !== commenterUsername && commentID) {
+          if (postAuthor !== commentAuthorUsername) {
+            newNotification.message = `${commenterName} replied to a comment on your post.`;
+            io.to(postAuthor).emit("newCommentNotification", newNotification);
+
+            if (commentAuthorUsername !== commenterUsername) {
+              newNotification.message = `${commenterName} replied to your comment.`;
+              io.to(commentAuthorUsername).emit(
+                "newCommentNotification",
+                newNotification
+              );
+            }
+          } else if (postAuthor === commentAuthorUsername && commentAuthorUsername !==commenterUsername) {
+            newNotification.message = `${commenterName} replied to your comment.`;
+            io.to(postAuthor).emit("newCommentNotification", newNotification);
+          }
+        } else if (
+          postAuthor === commenterUsername &&
+          commentAuthorUsername !== commenterUsername &&
+          commentID
+        ) {
+          newNotification.message = `${commenterName} replied to your comment.`;
+          io.to(commentAuthorUsername).emit(
+            "newCommentNotification",
+            newNotification
+          );
+        } else if (postAuthor !== commenterUsername && !commentID) {
+          newNotification.message = `${commenterName} commented on your post.`;
+          io.to(postAuthor).emit("newCommentNotification", newNotification);
+        }
+      } catch (error) {
+        console.error("Error emitting notification event:", error);
       }
-    } catch (error) {
-      console.error("Error emitting notification event:", error);
     }
-  });
+  );
 
   socket.on("leaveRoom", ({ roomId }) => {
     socket.leave(roomId);
@@ -150,24 +189,6 @@ io.on("connection", async (socket) => {
   socket.on("disconnect", () => {
     console.log("Client disconnected");
   });
-});
-
-app.get("/api/messages", async (req, res) => {
-  const { groupId, page = 1 } = req.query;
-  const pageSize = 20;
-  const skip = (page - 1) * pageSize;
-
-  try {
-    const messages = await Message.find({ groupId })
-      .sort({ timestamp: -1 })
-      .skip(skip)
-      .limit(pageSize)
-      .exec();
-    res.json({ messages });
-  } catch (error) {
-    console.error("Error fetching messages:", error);
-    res.status(500).json({ error: "Internal Server Error" });
-  }
 });
 
 const PORT = process.env.PORT || 3001;
