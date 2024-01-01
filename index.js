@@ -4,10 +4,14 @@ const socketIO = require("socket.io");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const Post = require("./postSchema");
+const User = require("./userSchema");
 require("dotenv").config();
 
 const app = express();
 app.use(cors());
+
+const loggedUsers = new Set();
+const anonymousUsers = new Set();
 
 const server = http.createServer(app);
 const io = socketIO(server, {
@@ -81,20 +85,44 @@ groups.forEach((groupId) => {
 
 io.on("connection", async (socket) => {
   console.log("Client connected");
+console.log(loggedUsers);
+console.log(anonymousUsers);
+if (socket.handshake.query.userId) {
+  const userId = socket.handshake.query.userId;
+  
+  loggedUsers.add(userId);
+
+  anonymousUsers.delete(socket.id);
+
+  io.emit("userConnected", {
+    loggedInUsersCount: loggedUsers.size,
+    anonymousUsersCount: anonymousUsers.size,
+  });
+} else {
+  const anonymousUserId = socket.id;
+  anonymousUsers.add(anonymousUserId);
+
+  io.emit("anonymousUserConnected", {
+    loggedInUsersCount: loggedUsers.size,
+    anonymousUsersCount: anonymousUsers.size,
+  });
+}
+
   socket.on("joinRoom", ({ roomId }) => {
     socket.join(roomId);
   });
   socket.on("join", ({ username }) => {
     socket.join(username);
+    console.log("joined", username);
   });
-  socket.on("newReply", (dataToSendInSocket) => {
+  socket.on("newReply", async (dataToSendInSocket) => {
     try {
       io.to(dataToSendInSocket.postID).emit("newReply", dataToSendInSocket);
     } catch (error) {
       console.error("Error emitting newReply event:", error);
     }
   });
-  socket.on("newComment", (dataToSendInSocket) => {
+  socket.on("newComment", async (dataToSendInSocket) => {
     try {
       io.to(dataToSendInSocket.postID).emit("newComment", dataToSendInSocket);
     } catch (error) {
@@ -102,78 +130,41 @@ io.on("connection", async (socket) => {
     }
   });
 
+  socket.on("newReport", async ({ newCommentNotification }) => {
+    try {
+      const isAdminUsers = await User.find({ isAdmin: true }).distinct(
+        "username"
+      );
+
+      isAdminUsers.forEach((username) => {
+        io.to(username).emit("newReport", { newCommentNotification });
+      });
+    } catch (error) {
+      console.error("Error emitting newReport event:", error);
+    }
+  });
+
   socket.on(
     "newCommentNotification",
-    async ({ newCommentNotification, commentID }) => {
+    async ({ newCommentNotification }) => {
       const {
-        commenterUsername,
-        commentAuthorUsername,
-        commenterName,
-        date,
         postID,
       } = newCommentNotification;
 
       try {
         const post = await Post.findById(postID)
-          .select("followers author")
+          .select("followers")
           .exec();
         if (!post) {
           console.error("Post not found");
           return;
         }
-        const postAuthor = post?.author?.username;
-        const followers = post?.followers.filter(
-          (u) =>
-            u !== commenterUsername &&
-            u !== commentAuthorUsername &&
-            u !== postAuthor
-        );
-        const newNotification = {
-          commenterUsername,
-          date,
-          message: commentID
-            ? `${commenterName} replied to a comment you are following.`
-            : `${commenterName} commented on a post you are following.`,
-          postID,
-          read: false,
-        };
+        const followers = post?.followers;
 
-        // sending notifications to followers
         followers?.forEach((username) => {
-          io.to(username).emit("newCommentNotification", newNotification);
+          io.to(username).emit("newCommentNotification", newCommentNotification);
         });
 
-        // sending to postAuthor and comment author
-        if (postAuthor !== commenterUsername && commentID) {
-          if (postAuthor !== commentAuthorUsername) {
-            newNotification.message = `${commenterName} replied to a comment on your post.`;
-            io.to(postAuthor).emit("newCommentNotification", newNotification);
-
-            if (commentAuthorUsername !== commenterUsername) {
-              newNotification.message = `${commenterName} replied to your comment.`;
-              io.to(commentAuthorUsername).emit(
-                "newCommentNotification",
-                newNotification
-              );
-            }
-          } else if (postAuthor === commentAuthorUsername && commentAuthorUsername !==commenterUsername) {
-            newNotification.message = `${commenterName} replied to your comment.`;
-            io.to(postAuthor).emit("newCommentNotification", newNotification);
-          }
-        } else if (
-          postAuthor === commenterUsername &&
-          commentAuthorUsername !== commenterUsername &&
-          commentID
-        ) {
-          newNotification.message = `${commenterName} replied to your comment.`;
-          io.to(commentAuthorUsername).emit(
-            "newCommentNotification",
-            newNotification
-          );
-        } else if (postAuthor !== commenterUsername && !commentID) {
-          newNotification.message = `${commenterName} commented on your post.`;
-          io.to(postAuthor).emit("newCommentNotification", newNotification);
-        }
       } catch (error) {
         console.error("Error emitting notification event:", error);
       }
@@ -188,6 +179,22 @@ io.on("connection", async (socket) => {
   });
   socket.on("disconnect", () => {
     console.log("Client disconnected");
+
+    if (socket.handshake.query.userId) {
+      const userId = socket.handshake.query.userId;
+      loggedUsers.delete(userId);
+      io.emit("userDisconnected", {
+        loggedInUsersCount: loggedUsers.size,
+        anonymousUsersCount: anonymousUsers.size,
+      });
+    } else {
+      const anonymousUserId = socket.id;
+      anonymousUsers.delete(anonymousUserId);
+      io.emit("anonymousUserDisconnected", {
+        loggedInUsersCount: loggedUsers.size,
+        anonymousUsersCount: anonymousUsers.size,
+      });
+    }
   });
 });
 
